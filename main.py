@@ -1,136 +1,143 @@
+import os
+import time
 import streamlit as st
-import openai
+import numpy as np
 import requests
 from sklearn.metrics.pairwise import cosine_similarity
+from openai import OpenAI
 
-# ============================
-# ⚙️ Streamlit Page Setup
-# ============================
-st.set_page_config(page_title="Semantic Similarity Checker", page_icon="🔍", layout="centered")
-st.title("🔍 Semantic Question Matcher (Groq + OpenAI)")
+# --- Streamlit Setup ---
+st.set_page_config(page_title="Semantic Similarity App", page_icon="🧠", layout="wide")
+st.title("🧠 Semantic Similarity & Groq Explanation App")
+st.write("Compare two questions semantically using OpenAI embeddings and get explanations from Groq.")
 
-st.markdown("""
-This app compares **two questions** using OpenAI embeddings and provides an explanation using **Groq AI**.  
-Enter both API keys below and your questions to get the similarity result.
-""")
+# --- Sidebar for API Keys ---
+st.sidebar.header("🔐 API Configuration")
+openai_key = st.sidebar.text_input("Enter your OpenAI API Key", type="password")
+groq_key = st.sidebar.text_input("Enter your Groq API Key", type="password")
 
-# ============================
-# 🔐 API Keys Input (User provides)
-# ============================
-openai_api_key = st.text_input("🔑 OpenAI API Key", type="password", help="Required for generating embeddings.")
-groq_api_key = st.text_input("⚡ Groq API Key", type="password", help="Required for getting explanations.")
+# Initialize clients only when keys are entered
+if openai_key:
+    client = OpenAI(api_key=openai_key)
+else:
+    client = None
 
-# Initialize clients only if keys are provided
-if openai_api_key:
-    openai.api_key = openai_api_key
+if not openai_key or not groq_key:
+    st.warning("⚠️ Please provide both OpenAI and Groq API keys to proceed.")
+    st.stop()
 
-
-# ============================
-# 🧩 Helper Functions
-# ============================
-
-def get_openai_embeddings(text):
-    """Generate OpenAI embeddings for a given text."""
+# --- Groq Response Function ---
+def get_groq_response(prompt):
+    """Get explanation from Groq API."""
+    url = "https://api.groq.com/openai/v1/chat/completions"
+    headers = {
+        "Authorization": f"Bearer {groq_key}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": "llama-3.1-70b",
+        "messages": [
+            {"role": "system", "content": "You are a helpful assistant that explains question similarity clearly."},
+            {"role": "user", "content": prompt}
+        ]
+    }
     try:
-        response = openai.embeddings.create(
-            model="text-embedding-3-small",
-            input=text
-        )
-        return response.data[0].embedding
+        res = requests.post(url, headers=headers, json=payload)
+        res.raise_for_status()
+        return res.json()["choices"][0]["message"]["content"]
+    except Exception as e:
+        st.error(f"❌ Error fetching Groq response: {e}")
+        return None
+
+
+# --- Auto-Chunked Embedding Function ---
+def get_openai_embeddings(text, model="text-embedding-3-small", max_chunk_tokens=8000):
+    """Automatically splits long text and computes averaged embeddings."""
+    import math
+
+    try:
+        if not text.strip():
+            return None
+
+        # Rough token estimation (1 token ≈ 4 chars)
+        token_estimate = len(text) / 4
+        if token_estimate <= max_chunk_tokens:
+            resp = client.embeddings.create(input=text, model=model)
+            return np.array(resp.data[0].embedding)
+
+        # Split text into safe chunks
+        words = text.split()
+        chunks = []
+        chunk = []
+        tokens = 0
+        for word in words:
+            tokens += len(word) / 4
+            if tokens >= max_chunk_tokens:
+                chunks.append(" ".join(chunk))
+                chunk, tokens = [], 0
+            chunk.append(word)
+        if chunk:
+            chunks.append(" ".join(chunk))
+
+        st.info(f"⚙️ Text automatically split into {len(chunks)} chunks to fit token limit.")
+
+        embeddings = []
+        for ch in chunks:
+            resp = client.embeddings.create(input=ch, model=model)
+            embeddings.append(resp.data[0].embedding)
+            time.sleep(0.2)  # Avoid rate limiting
+
+        avg_embedding = np.mean(np.array(embeddings), axis=0)
+        return avg_embedding
+
     except Exception as e:
         st.error(f"❌ Error getting embeddings: {e}")
         return None
 
 
-def get_groq_response(prompt):
-    """Get a Groq response (chat completion)."""
-    try:
-        url = "https://api.groq.com/openai/v1/chat/completions"
-        headers = {
-            "Authorization": f"Bearer {groq_api_key}",
-            "Content-Type": "application/json"
-        }
-        payload = {
-            "model": "llama-3.1-70b",
-            "messages": [
-                {"role": "system", "content": "You are an expert semantic evaluator."},
-                {"role": "user", "content": prompt}
-            ]
-        }
-        response = requests.post(url, headers=headers, json=payload)
-        response.raise_for_status()
-        data = response.json()
-        return data["choices"][0]["message"]["content"]
-    except Exception as e:
-        st.error(f"❌ Error getting Groq response: {e}")
-        return None
-
-
-def compare_questions(master_q, user_q):
-    """Compare two questions and return a similarity score."""
-    if master_q.strip() == user_q.strip():
-        return 1.0  # Perfect match
-
-    emb_master = get_openai_embeddings(master_q)
-    emb_user = get_openai_embeddings(user_q)
-
-    if emb_master is None or emb_user is None:
-        return None
-
-    similarity = cosine_similarity([emb_master], [emb_user])[0][0]
-    return similarity
-
-
-# ============================
-# 🧠 User Inputs
-# ============================
-st.subheader("📝 Enter Your Questions")
-
+# --- Input Fields ---
 col1, col2 = st.columns(2)
-
 with col1:
-    master_question = st.text_area("Master Question", height=120, placeholder="e.g., Why is my animation lagging?")
+    q1 = st.text_area("🧩 Enter Master Question", height=200, placeholder="e.g., Why is my animation lagging?")
 with col2:
-    user_question = st.text_area("Your Question", height=120, placeholder="e.g., My animation isn't smooth.")
+    q2 = st.text_area("🎯 Enter Question to Compare", height=200, placeholder="e.g., My animation feels slow.")
 
-# ============================
-# 🚀 Compare Button
-# ============================
-if st.button("🔎 Compare Questions", type="primary", use_container_width=True):
-    if not openai_api_key or not groq_api_key:
-        st.warning("⚠️ Please enter both OpenAI and Groq API keys.")
-    elif not master_question or not user_question:
-        st.warning("⚠️ Please enter both questions.")
-    else:
-        with st.spinner("Calculating similarity..."):
-            similarity = compare_questions(master_question, user_question)
+if st.button("🔍 Compare Questions", type="primary", use_container_width=True):
+    if not q1.strip() or not q2.strip():
+        st.warning("Please fill both questions before comparing.")
+        st.stop()
 
-        if similarity is not None:
-            similarity_percent = similarity * 100
-            st.success(f"🔹 Similarity Score: **{similarity_percent:.2f}%**")
-
-            if similarity >= 0.98:
-                st.markdown("✅ **Perfect Match (100%)** — Questions are identical.")
-            elif similarity >= 0.85:
-                st.markdown("🟢 **Highly Similar** — Questions mean almost the same.")
-            elif similarity >= 0.6:
-                st.markdown("🟡 **Moderately Similar** — Some overlap in meaning.")
-            else:
-                st.markdown("🔴 **Low Similarity** — Different questions.")
-
-            # Generate Groq explanation
-            with st.spinner("Generating Groq explanation..."):
-                prompt = f"Compare these two questions semantically and explain their similarity:\n\nQ1: {master_question}\nQ2: {user_question}"
-                explanation = get_groq_response(prompt)
-
-            if explanation:
-                st.subheader("🤖 Groq Explanation")
-                st.write(explanation)
+    with st.spinner("Calculating embeddings and similarity..."):
+        # ✅ Handle exact matches instantly
+        if q1.strip().lower() == q2.strip().lower():
+            similarity = 1.0
         else:
-            st.error("Failed to compute similarity. Please check API keys or input size.")
+            emb1 = get_openai_embeddings(q1)
+            emb2 = get_openai_embeddings(q2)
 
-# ============================
-# ℹ️ Footer
-# ============================
-st.markdown("---")
-st.caption("Built with ❤️ using OpenAI for embeddings and Groq for responses.")
+            if emb1 is None or emb2 is None:
+                st.error("Failed to compute embeddings. Check your API keys or inputs.")
+                st.stop()
+
+            similarity = cosine_similarity([emb1], [emb2])[0][0]
+
+        # Display similarity
+        st.subheader("🔹 Similarity Result")
+        st.write(f"**Similarity Score:** {similarity * 100:.2f}%")
+
+        if similarity >= 0.98:
+            st.success("✅ Perfect Match (Identical or nearly identical meaning).")
+        elif similarity >= 0.85:
+            st.info("🟢 Highly Similar Questions.")
+        elif similarity >= 0.65:
+            st.warning("🟠 Somewhat Similar but Different Contexts.")
+        else:
+            st.error("❌ Different Questions.")
+
+        # Groq Explanation
+        with st.spinner("Getting explanation from Groq..."):
+            prompt = f"Explain briefly how similar these two questions are:\nQ1: {q1}\nQ2: {q2}\nSimilarity: {similarity*100:.2f}%"
+            explanation = get_groq_response(prompt)
+            if explanation:
+                st.markdown("### 🤖 Groq Explanation")
+                st.write(explanation)
